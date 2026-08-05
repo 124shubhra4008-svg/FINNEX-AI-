@@ -1,0 +1,89 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-100 transition-colors duration-300;
+    background-image: radial-gradient(circle at 15% 0%, rgba(108, 92, 231, 0.08), transparent 40%),
+      radial-gradient(circle at 85% 20%, rgba(52, 211, 153, 0.06), transparent 40%);
+    background-attachment: fixed;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-white/80 dark:bg-white/[0.04] backdrop-blur-md border border-slate-200/70 dark:border-white/10 rounded-2xl shadow-sm shadow-slate-200/60 dark:shadow-black/30 transition-all duration-200;
+  }
+
+  .glass-card:hover {
+    @apply shadow-md;
+  }
+
+  .btn-primary {
+    @apply bg-gradient-to-r from-brand to-brand-dark hover:brightness-110 text-white font-medium rounded-xl px-4 py-2.5 transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm shadow-brand/30;
+  }
+
+  .btn-secondary {
+    @apply bg-white/80 dark:bg-white/10 hover:bg-white dark:hover:bg-white/20 border border-slate-200 dark:border-white/10 rounded-xl px-4 py-2.5 transition-colors;
+  }
+
+  .input-field {
+    @apply w-full rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 px-3 py-2.5 outline-none focus:ring-2 focus:ring-brand focus:border-transparent transition text-sm;
+  }
+
+  .page-title {
+    @apply font-display text-2xl font-bold tracking-tight;
+  }
+
+  .section-label {
+    @apply text-xs font-semibold uppercase tracking-wider text-slate-400 dark:text-slate-500;
+  }
+
+  .sidebar-link {
+    @apply flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-white/5 hover:text-slate-900 dark:hover:text-white transition-colors;
+  }
+
+  .sidebar-link-active {
+    @apply bg-brand/10 text-brand dark:text-brand-light hover:bg-brand/10 hover:text-brand;
+  }
+
+  .category-badge {
+    @apply inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium;
+  }
+
+  .goal-complete {
+    @apply ring-2 ring-amber-400/60 shadow-amber-400/20;
+  }
+
+  .empty-state {
+    @apply flex flex-col items-center justify-center text-center py-10 text-slate-400;
+  }
+}
+
+@layer utilities {
+  @keyframes fadeInUp {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  .animate-fade-in-up {
+    animation: fadeInUp 0.45s ease-out both;
+  }
+
+  .stagger-1 { animation-delay: 0.04s; }
+  .stagger-2 { animation-delay: 0.08s; }
+  .stagger-3 { animation-delay: 0.12s; }
+  .stagger-4 { animation-delay: 0.16s; }
+  .stagger-5 { animation-delay: 0.2s; }
+}
