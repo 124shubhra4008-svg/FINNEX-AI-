@@ -1,22 +1,205 @@
-﻿"""
+"""
 receipt_scanner.py
 Extracts merchant, amount, and date from a photo of a receipt.
+
+OCR engine:
+- Tesseract OCR (primary, no API key required)
+- Gemini/OpenAI are optional fallbacks
 """
 
 import os
 import re
 import base64
 import json
+import io
 from datetime import datetime
+
+import pytesseract
+from PIL import Image
+
+# Explicit Windows Tesseract path.
+# This makes the scanner work even if Tesseract is not in PATH.
+TESSERACT_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+if os.path.exists(TESSERACT_PATH):
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+
 
 AMOUNT_PATTERN = re.compile(r"(\d+[.,]\d{2})")
 
 
-def _try_gemini_vision(image_bytes: bytes, mime_type: str) -> dict | None:
+def _try_tesseract(image_bytes: bytes) -> dict | None:
+    """Extract receipt information using local Tesseract OCR."""
+
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+
+        # Convert to RGB so different image formats work reliably.
+        image = image.convert("RGB")
+
+        raw_text = pytesseract.image_to_string(
+            image,
+            config="--psm 6",
+        )
+
+        print("Tesseract OCR text:")
+        print(raw_text)
+
+        if not raw_text.strip():
+            print("Tesseract returned no text.")
+            return None
+
+        # ---------------------------------------------------------
+        # Find final total
+        # ---------------------------------------------------------
+
+        amount = None
+
+        total_patterns = [
+            r"\bgrand\s*total\b\D{0,15}([0-9]+[.,][0-9]{2})",
+            r"\btotal\s*amount\b\D{0,15}([0-9]+[.,][0-9]{2})",
+            r"\btotal\b\D{0,15}([0-9]+[.,][0-9]{2})",
+            r"\bamount\s*payable\b\D{0,15}([0-9]+[.,][0-9]{2})",
+            r"\bnet\s*amount\b\D{0,15}([0-9]+[.,][0-9]{2})",
+        ]
+
+        lines = [
+            line.strip()
+            for line in raw_text.splitlines()
+            if line.strip()
+        ]
+
+        for line in lines:
+            # Ignore subtotal lines.
+            if re.search(r"\bsub\s*total\b", line, re.IGNORECASE):
+                continue
+
+            for pattern in total_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+
+                if match:
+                    try:
+                        amount = float(
+                            match.group(1).replace(",", ".")
+                        )
+                        break
+                    except ValueError:
+                        pass
+
+            if amount is not None:
+                break
+
+        # If a clearly labelled total was not found,
+        # use the largest detected decimal amount.
+        if amount is None:
+            candidates = AMOUNT_PATTERN.findall(raw_text)
+
+            values = []
+
+            for candidate in candidates:
+                try:
+                    values.append(
+                        float(candidate.replace(",", "."))
+                    )
+                except ValueError:
+                    pass
+
+            if values:
+                amount = max(values)
+
+        # ---------------------------------------------------------
+        # Find date
+        # ---------------------------------------------------------
+
+        date_match = re.search(
+            r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b",
+            raw_text,
+        )
+
+        if date_match:
+            receipt_date = date_match.group(1)
+        else:
+            # Also support YYYY-MM-DD.
+            iso_date_match = re.search(
+                r"\b(\d{4}-\d{1,2}-\d{1,2})\b",
+                raw_text,
+            )
+
+            if iso_date_match:
+                receipt_date = iso_date_match.group(1)
+            else:
+                receipt_date = datetime.today().strftime("%Y-%m-%d")
+
+        # ---------------------------------------------------------
+        # Find merchant
+        # ---------------------------------------------------------
+
+        merchant = None
+
+        # Ignore common non-merchant lines.
+        ignored_words = [
+            "receipt",
+            "invoice",
+            "tax invoice",
+            "bill",
+            "date",
+            "time",
+            "total",
+            "subtotal",
+            "amount",
+            "gst",
+            "cgst",
+            "sgst",
+            "cash",
+            "change",
+            "phone",
+            "mobile",
+        ]
+
+        for line in lines[:8]:
+            cleaned = line.strip()
+
+            if len(cleaned) < 2:
+                continue
+
+            lower_line = cleaned.lower()
+
+            if any(word == lower_line for word in ignored_words):
+                continue
+
+            # Skip lines that mainly contain numbers.
+            if len(re.sub(r"[^0-9]", "", cleaned)) > len(cleaned) / 2:
+                continue
+
+            merchant = cleaned
+            break
+
+        return {
+            "success": True,
+            "merchant": merchant,
+            "amount": amount,
+            "date": receipt_date,
+            "raw_text": raw_text[:2000],
+            "source": "tesseract",
+        }
+
+    except Exception as e:
+        print(
+            f"Tesseract receipt scanner error: "
+            f"{type(e).__name__}: {e}"
+        )
+        return None
+
+
+def _try_gemini_vision(
+    image_bytes: bytes,
+    mime_type: str,
+) -> dict | None:
+    """Optional Gemini fallback."""
+
     api_key = os.environ.get("GEMINI_API_KEY")
 
     if not api_key:
-        print("Gemini receipt scanner: GEMINI_API_KEY is not set")
         return None
 
     try:
@@ -29,7 +212,7 @@ def _try_gemini_vision(image_bytes: bytes, mime_type: str) -> dict | None:
             "This is a photo of a receipt. "
             "Extract the merchant name, final total amount, and date. "
             "Reply with ONLY a JSON object and no markdown. "
-            "Use exactly this format: "
+            'Use exactly this format: '
             '{"merchant": "", "amount": null, "date": ""}. '
             "Use the FINAL TOTAL, not the subtotal. "
             "If a field cannot be determined, use null."
@@ -83,7 +266,12 @@ def _try_gemini_vision(image_bytes: bytes, mime_type: str) -> dict | None:
         return None
 
 
-def _try_openai_vision(image_bytes: bytes, mime_type: str) -> dict | None:
+def _try_openai_vision(
+    image_bytes: bytes,
+    mime_type: str,
+) -> dict | None:
+    """Optional OpenAI fallback."""
+
     api_key = os.environ.get("OPENAI_API_KEY")
 
     if not api_key:
@@ -97,14 +285,15 @@ def _try_openai_vision(image_bytes: bytes, mime_type: str) -> dict | None:
         b64 = base64.b64encode(image_bytes).decode()
 
         prompt = (
-            "This is a photo of a receipt. Reply with ONLY a JSON object, "
-            "no other text, in exactly this shape: "
+            "This is a photo of a receipt. "
+            "Reply with ONLY a JSON object, no other text, "
+            'in exactly this shape: '
             '{"merchant": "", "amount": null, "date": ""}. '
             "Use the FINAL TOTAL, not the subtotal. "
-            "If a field can't be determined, use null."
+            "If a field cannot be determined, use null."
         )
 
-        resp = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
                 {
@@ -117,7 +306,9 @@ def _try_openai_vision(image_bytes: bytes, mime_type: str) -> dict | None:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:{mime_type};base64,{b64}"
+                                "url": (
+                                    f"data:{mime_type};base64,{b64}"
+                                )
                             },
                         },
                     ],
@@ -126,7 +317,7 @@ def _try_openai_vision(image_bytes: bytes, mime_type: str) -> dict | None:
             max_tokens=200,
         )
 
-        text = resp.choices[0].message.content.strip()
+        text = response.choices[0].message.content.strip()
 
         text = re.sub(
             r"^```json\s*|\s*```$",
@@ -161,88 +352,31 @@ def _try_openai_vision(image_bytes: bytes, mime_type: str) -> dict | None:
         return None
 
 
-def _try_tesseract(image_bytes: bytes) -> dict | None:
-    try:
-        import pytesseract
-        from PIL import Image
-        import io
-
-        image = Image.open(io.BytesIO(image_bytes))
-        raw_text = pytesseract.image_to_string(image)
-
-        subtotal_check = re.search(
-            r"\bsub\s*total\b",
-            raw_text,
-            re.IGNORECASE,
-        )
-
-        amount = None
-
-        for line in raw_text.splitlines():
-            if subtotal_check and subtotal_check.group(0) in line:
-                continue
-
-            match = re.search(
-                r"\btotal\b\D{0,10}(\d+[.,]\d{2})",
-                line,
-                re.IGNORECASE,
-            )
-
-            if match:
-                amount = float(
-                    match.group(1).replace(",", ".")
-                )
-                break
-
-        if amount is None:
-            candidates = AMOUNT_PATTERN.findall(raw_text)
-
-            amount = max(
-                (
-                    float(c.replace(",", "."))
-                    for c in candidates
-                ),
-                default=None,
-            )
-
-        date_match = re.search(
-            r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
-            raw_text,
-        )
-
-        lines = [
-            line.strip()
-            for line in raw_text.splitlines()
-            if line.strip()
-        ]
-
-        merchant = lines[0] if lines else None
-
-        return {
-            "success": True,
-            "merchant": merchant,
-            "amount": amount,
-            "date": (
-                date_match.group(1)
-                if date_match
-                else datetime.today().strftime("%Y-%m-%d")
-            ),
-            "raw_text": raw_text[:1000],
-            "source": "tesseract",
-        }
-
-    except Exception as e:
-        print(
-            f"Tesseract receipt scanner error: "
-            f"{type(e).__name__}: {e}"
-        )
-        return None
-
-
 def parse_receipt(
     image_bytes: bytes,
     mime_type: str = "image/jpeg",
 ) -> dict:
+    """
+    Parse a receipt image.
+
+    Tesseract is used FIRST, so no API key is required.
+    Gemini/OpenAI are optional fallbacks if Tesseract
+    cannot extract any text.
+    """
+
+    # ---------------------------------------------------------
+    # 1. Tesseract OCR - primary scanner
+    # ---------------------------------------------------------
+
+    result = _try_tesseract(image_bytes)
+
+    if result:
+        return result
+
+    # ---------------------------------------------------------
+    # 2. Gemini - optional fallback
+    # ---------------------------------------------------------
+
     result = _try_gemini_vision(
         image_bytes,
         mime_type,
@@ -250,6 +384,10 @@ def parse_receipt(
 
     if result:
         return result
+
+    # ---------------------------------------------------------
+    # 3. OpenAI - optional fallback
+    # ---------------------------------------------------------
 
     result = _try_openai_vision(
         image_bytes,
@@ -259,16 +397,16 @@ def parse_receipt(
     if result:
         return result
 
-    result = _try_tesseract(image_bytes)
-
-    if result:
-        return result
+    # ---------------------------------------------------------
+    # Nothing worked
+    # ---------------------------------------------------------
 
     return {
         "success": False,
         "error": (
             "Receipt scanning failed. "
-            "Please make sure GEMINI_API_KEY is configured "
-            "on the backend, or install/configure Tesseract OCR."
+            "Tesseract OCR could not extract text from "
+            "the uploaded receipt."
         ),
     }
+
